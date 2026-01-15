@@ -11,7 +11,8 @@ API_KEY = "TcwdPNNYGjjgkRW4BRIAnjL7z5TLyJ"
 API_SECRET = "B5ALo5Mh8mgUREB6oGD4oyX3y185oElaz1LoU6Y3X5ZX0s8TvFZcX4YTVToJ"
 
 REFRESH_INTERVAL = 5
-STRADDLE_TARGET = 1000.0      # 🔥 EXIT target per straddle
+STRADDLE_TARGET = 1000.0       # Full straddle exit
+LEG_TARGET = STRADDLE_TARGET * 0.75  # 75% leg exit (750)
 # ========================================
 
 
@@ -45,7 +46,7 @@ def close_position(product_id, qty):
     payload = {
         "product_id": product_id,
         "size": qty,
-        "side": "buy",                 # BUY to close SELL
+        "side": "buy",  # BUY to close SELL
         "order_type": "market_order"
     }
 
@@ -64,6 +65,7 @@ def clear():
 
 # ---------- STATE ----------
 exited_straddles = set()
+exited_legs = set()
 
 # ---------- MAIN LOOP ----------
 while True:
@@ -71,11 +73,11 @@ while True:
         data = fetch_positions()
         clear()
 
-        print("📊 LIVE STRADDLE PnL + AUTO-EXIT")
+        print("📊 LIVE STRADDLE PnL + AUTO EXIT")
         print("=" * 100)
 
         if not data.get("success"):
-            print("❌ API error")
+            print("❌ API Error")
             time.sleep(REFRESH_INTERVAL)
             continue
 
@@ -86,6 +88,7 @@ while True:
             "LEGS": []
         })
 
+        # ---------- BUILD STRADDLES ----------
         for pos in data["result"]:
             size = float(pos.get("size", 0))
             if size >= 0:
@@ -104,34 +107,58 @@ while True:
             opt_type, asset, strike, expiry = parts
             key = f"{asset}-{strike}-{expiry}"
 
-            straddles[key][opt_type == "C" and "CALL" or "PUT"] += pnl
+            leg_type = "CALL" if opt_type == "C" else "PUT"
+
+            straddles[key][leg_type] += pnl
             straddles[key]["TOTAL"] += pnl
             straddles[key]["LEGS"].append({
                 "product_id": pos["product_id"],
-                "qty": qty
+                "qty": qty,
+                "type": leg_type
             })
 
+        # ---------- DISPLAY + EXIT LOGIC ----------
         for key, s in sorted(straddles.items()):
             sign_icon = "🟢" if s["TOTAL"] >= 0 else "🔴"
             exited = key in exited_straddles
 
             print(
                 f"{sign_icon} {key:<20} | "
-                f"CALL: {s['CALL']:>7.2f} | "
-                f"PUT: {s['PUT']:>7.2f} | "
-                f"TOTAL: {s['TOTAL']:>7.2f}"
+                f"CALL: {s['CALL']:>8.2f} | "
+                f"PUT: {s['PUT']:>8.2f} | "
+                f"TOTAL: {s['TOTAL']:>8.2f}"
                 f"{' ✅ EXITED' if exited else ''}"
             )
 
-            # ---------- AUTO EXIT ----------
-            if s["TOTAL"] >= STRADDLE_TARGET and not exited:
-                print(f"🚀 TARGET HIT → EXITING {key}")
+            # 🔥 STRADDLE EXIT
+            if s["TOTAL"] >= STRADDLE_TARGET and key not in exited_straddles:
+                print(f"🚀 STRADDLE TARGET HIT → EXITING BOTH LEGS {key}")
                 for leg in s["LEGS"]:
                     close_position(leg["product_id"], leg["qty"])
+                    exited_legs.add(leg["product_id"])
                 exited_straddles.add(key)
+                continue
+
+            # ⚡ INDIVIDUAL LEG EXIT (75%)
+            for leg in s["LEGS"]:
+                pid = leg["product_id"]
+
+                if pid in exited_legs:
+                    continue
+
+                if leg["type"] == "CALL" and s["CALL"] >= LEG_TARGET:
+                    print(f"⚡ CALL 75% TARGET HIT → EXITING CALL {key}")
+                    close_position(pid, leg["qty"])
+                    exited_legs.add(pid)
+
+                if leg["type"] == "PUT" and s["PUT"] >= LEG_TARGET:
+                    print(f"⚡ PUT 75% TARGET HIT → EXITING PUT {key}")
+                    close_position(pid, leg["qty"])
+                    exited_legs.add(pid)
 
         print("=" * 100)
-        print(f"🎯 Target per straddle: {STRADDLE_TARGET}")
+        print(f"🎯 Straddle Target : {STRADDLE_TARGET}")
+        print(f"⚡ Leg Target (75%): {LEG_TARGET}")
         print(f"⏱️  {time.strftime('%H:%M:%S')}")
 
     except KeyboardInterrupt:
